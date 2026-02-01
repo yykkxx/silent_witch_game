@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { 
   GameState, 
   PlayerState, 
@@ -126,6 +126,34 @@ export function useGame() {
   const [winner, setWinner] = useState<'player' | 'opponent' | null>(null);
   const [battleLog, setBattleLog] = useState<string[]>([]);
   const [animating, setAnimating] = useState(false);
+  const gameStateRef = useRef<GameState | null>(null);
+
+  useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
+
+  const normalizeActiveCharacters = useCallback((state: GameState): GameState => {
+    let updated = state;
+
+    (['player', 'opponent'] as const).forEach(side => {
+      const team = updated[side];
+      const active = team.characters[team.activeCharacterIndex];
+      if (!active || active.isDefeated) {
+        const nextIndex = team.characters.findIndex(c => !c.isDefeated);
+        if (nextIndex !== -1 && nextIndex !== team.activeCharacterIndex) {
+          updated = {
+            ...updated,
+            [side]: {
+              ...team,
+              activeCharacterIndex: nextIndex
+            }
+          };
+        }
+      }
+    });
+
+    return updated;
+  }, []);
   
   // 添加战斗日志
   const addLog = useCallback((message: string) => {
@@ -310,9 +338,12 @@ export function useGame() {
       executeAITurn();
     }, 800);
   }, [gameState, animating]);
-  
+
   // AI执行回合
   const executeAITurn = useCallback(() => {
+    const normalized = normalizeActiveCharacters(gameStateRef.current || gameState);
+    setGameState(normalized);
+
     // AI恢复魔力
     setGameState(prev => ({
       ...prev,
@@ -322,7 +353,7 @@ export function useGame() {
       }
     }));
     
-    const decision = makeAIDecision(gameState);
+    const decision = makeAIDecision(normalized);
     
     if (decision.action === 'end') {
       addLog('🤖 对手结束回合');
@@ -340,7 +371,7 @@ export function useGame() {
             mana: 8
           }
         }));
-        addLog(`🌟 第 ${gameState.turnCount + 1} 回合开始！魔力已恢复`);
+        addLog('🌟 新回合开始！魔力已恢复');
       }, 1500);
       return;
     }
@@ -362,9 +393,27 @@ export function useGame() {
         
       case 'burst':
       case 'skill':
-      case 'normal':
-        const opponent = gameState.opponent;
-        const activeChar = opponent.characters[opponent.activeCharacterIndex];
+      case 'normal': {
+        const validState = normalizeActiveCharacters(gameStateRef.current || gameState);
+        const opponent = validState.opponent;
+        const actingIndex = opponent.activeCharacterIndex;
+        const activeChar = opponent.characters[actingIndex];
+        if (!activeChar || activeChar.isDefeated) {
+          addLog('🤖 对手无有效角色，回合结束');
+          setTimeout(() => {
+            setGameState(prev => ({
+              ...prev,
+              currentTurn: 'player',
+              turnCount: prev.turnCount + 1,
+              player: {
+                ...prev.player,
+                mana: 8
+              }
+            }));
+            addLog('🌟 新回合开始！魔力已恢复');
+          }, 600);
+          break;
+        }
         const skillIndex = decision.skillIndex || 0;
         const skill = activeChar.card.skills[skillIndex];
         
@@ -383,7 +432,7 @@ export function useGame() {
             const newState = { ...prev };
             const char = newState.opponent.characters[newState.opponent.activeCharacterIndex];
             char.currentEnergy = Math.min(3, char.currentEnergy + (skill.energyGain || 0));
-            return newState;
+            return normalizeActiveCharacters(newState);
           });
         }
         
@@ -412,12 +461,13 @@ export function useGame() {
             playerChar.elementAttachment = skill.element;
           }
           
-          return newState;
+          return normalizeActiveCharacters(newState);
         });
         
         addLog(`🤖 对手使用了 ${skill.name}！`);
         setTimeout(() => executeAITurn(), 1200);
         break;
+      }
     }
     
     checkGameEnd();
